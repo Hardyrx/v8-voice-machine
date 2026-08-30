@@ -1,18 +1,147 @@
-import gradio as gr
+import streamlit as st
 import requests
 import datetime
-import io
 import torch
 import soundfile as sf
-import numpy as np
 import tempfile
 import os
+
+# ── PAGE CONFIG ──
+st.set_page_config(
+    page_title="V8 Voice Machine",
+    page_icon="⚡",
+    layout="centered",
+    initial_sidebar_state="collapsed"
+)
+
+# ── CSS ──
+st.markdown("""
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=Space+Mono&display=swap');
+
+html, body, [class*="css"] {
+    font-family: 'Space Grotesk', sans-serif;
+    background-color: #080808;
+    color: #ccc;
+}
+
+.header {
+    text-align: center;
+    padding: 40px 0 32px;
+    border-bottom: 1px solid #1a1a1a;
+    margin-bottom: 32px;
+}
+
+.logo {
+    font-family: 'Space Mono', monospace;
+    font-size: 11px;
+    letter-spacing: 3px;
+    color: #333;
+    text-transform: uppercase;
+    margin-bottom: 12px;
+}
+
+.titulo {
+    font-size: 42px;
+    font-weight: 700;
+    color: #fff;
+    letter-spacing: -1px;
+    line-height: 1.1;
+}
+
+.titulo span { color: #ff3c00; }
+
+.sub {
+    font-family: 'Space Mono', monospace;
+    font-size: 13px;
+    color: #444;
+    margin-top: 8px;
+}
+
+.card {
+    background: #0e0e0e;
+    border: 1px solid #1a1a1a;
+    border-radius: 12px;
+    padding: 24px;
+    margin-bottom: 16px;
+}
+
+.label {
+    font-family: 'Space Mono', monospace;
+    font-size: 10px;
+    letter-spacing: 2px;
+    color: #444;
+    text-transform: uppercase;
+    margin-bottom: 8px;
+}
+
+.status-ok {
+    background: #0a0a0a;
+    border-left: 3px solid #00ff88;
+    padding: 14px 18px;
+    border-radius: 8px;
+    font-family: 'Space Mono', monospace;
+    font-size: 12px;
+    color: #888;
+    margin: 8px 0;
+}
+
+.status-err {
+    background: #0a0a0a;
+    border-left: 3px solid #ff3c00;
+    padding: 14px 18px;
+    border-radius: 8px;
+    font-family: 'Space Mono', monospace;
+    font-size: 12px;
+    color: #888;
+    margin: 8px 0;
+}
+
+.stTextInput input, .stTextArea textarea {
+    background: #111 !important;
+    border: 1px solid #222 !important;
+    border-radius: 8px !important;
+    color: #ddd !important;
+    font-family: 'Space Grotesk', sans-serif !important;
+}
+
+.stButton button {
+    background: #ff3c00 !important;
+    color: white !important;
+    border: none !important;
+    border-radius: 8px !important;
+    font-weight: 700 !important;
+    font-family: 'Space Grotesk', sans-serif !important;
+    padding: 10px 28px !important;
+    width: 100%;
+}
+
+.stButton button:hover { opacity: 0.85 !important; }
+
+.stSlider { color: #888 !important; }
+.stTabs [data-baseweb="tab"] { color: #444; font-family: 'Space Grotesk', sans-serif; }
+.stTabs [aria-selected="true"] { color: #ff3c00 !important; border-bottom: 2px solid #ff3c00 !important; }
+
+footer { display: none !important; }
+#MainMenu { visibility: hidden; }
+header { visibility: hidden; }
+</style>
+""", unsafe_allow_html=True)
 
 # ── CONFIG ──
 SHEET_ID   = "1bQaqMXb9Uuu6H5x9VdIvIjDrZNMQoAMw7iXPRkUZQCY"
 SHEET_NAME = "licencas"
 
-# ── LICENÇA ──
+# ── HEADER ──
+st.markdown("""
+<div class="header">
+    <div class="logo">Algoritmo Secreto</div>
+    <div class="titulo">V8 <span>Voice</span> Machine</div>
+    <div class="sub">estúdio de voz IA · clone qualquer voz · PT-BR</div>
+</div>
+""", unsafe_allow_html=True)
+
+# ── FUNÇÕES ──
 def limpar(v):
     return str(v).strip().strip('"').strip("'").strip()
 
@@ -36,12 +165,12 @@ def validar_licenca(chave_raw):
     try:
         resp = requests.get(url, timeout=10)
         if resp.status_code != 200:
-            return False, None, "Erro ao verificar licença. Tente novamente."
+            return False, None, "Erro ao verificar licença."
         rows = parse_csv(resp.text)
         for row in rows:
             if row.get("chave","").upper() == chave:
                 if row.get("ativo","").upper() != "TRUE":
-                    return False, None, "Licença desativada. Contate o suporte."
+                    return False, None, "Licença desativada."
                 exp = row.get("expira","")
                 if exp and exp.lower() != "ilimitado":
                     try:
@@ -59,238 +188,115 @@ def validar_licenca(chave_raw):
     except Exception as e:
         return False, None, f"Erro: {str(e)}"
 
-# ── TTS ──
-modelo_cache = {}
+@st.cache_resource
+def carregar_modelo():
+    from chatterbox.tts import ChatterboxTTS
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    return ChatterboxTTS.from_pretrained(device=device)
 
-def carregar_chatterbox():
-    if "chatterbox" not in modelo_cache:
-        from chatterbox.tts import ChatterboxTTS
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-        modelo_cache["chatterbox"] = ChatterboxTTS.from_pretrained(device=device)
-    return modelo_cache["chatterbox"]
+# ── LICENÇA ──
+st.markdown('<div class="label">Chave de acesso</div>', unsafe_allow_html=True)
+chave = st.text_input("", placeholder="V8VM-XXXXXX", label_visibility="collapsed")
 
-def gerar_narrador(chave, texto, expressividade):
+licenca_ok = False
+dados_licenca = None
+
+if chave:
     ok, dados, erro = validar_licenca(chave)
-    if not ok:
-        return None, f"❌ {erro}"
-    if not texto.strip():
-        return None, "⚠️ Cole o roteiro no campo acima."
-    try:
-        model = carregar_chatterbox()
-        wav = model.generate(texto, exaggeration=float(expressividade), cfg_weight=0.5)
-        audio_np = wav.squeeze().numpy()
-        tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
-        sf.write(tmp.name, audio_np, model.sr)
-        dur = len(audio_np) / model.sr
-        nome = dados.get("nome","Usuário")
-        plano = dados.get("plano","BASICO")
-        return tmp.name, f"✅ Gerado! {dur/60:.1f} min · {nome} · {plano}"
-    except Exception as e:
-        return None, f"❌ Erro: {str(e)}"
-
-def gerar_clone(chave, texto, audio_ref, expressividade):
-    ok, dados, erro = validar_licenca(chave)
-    if not ok:
-        return None, f"❌ {erro}"
-    plano = dados.get("plano","BASICO").upper()
-    if plano not in ["PRO","FULL"]:
-        return None, "❌ Clone de voz disponível apenas nos planos PRO e FULL."
-    if not texto.strip():
-        return None, "⚠️ Cole o roteiro."
-    if audio_ref is None:
-        return None, "⚠️ Faça upload do áudio de referência."
-    try:
-        model = carregar_chatterbox()
-        wav = model.generate(texto, audio_prompt_path=audio_ref, exaggeration=float(expressividade), cfg_weight=0.5)
-        audio_np = wav.squeeze().numpy()
-        tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
-        sf.write(tmp.name, audio_np, model.sr)
-        dur = len(audio_np) / model.sr
-        return tmp.name, f"✅ Clone gerado! {dur/60:.1f} min"
-    except Exception as e:
-        return None, f"❌ Erro: {str(e)}"
-
-# ── CSS ──
-CSS = """
-@import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=Space+Mono&display=swap');
-
-body, .gradio-container {
-    background: #080808 !important;
-    font-family: 'Space Grotesk', sans-serif !important;
-}
-
-.gradio-container { max-width: 860px !important; margin: 0 auto !important; padding: 40px 24px !important; }
-
-#header {
-    text-align: center;
-    padding: 48px 0 36px;
-    border-bottom: 1px solid #1a1a1a;
-    margin-bottom: 36px;
-}
-
-#logo {
-    font-family: 'Space Mono', monospace;
-    font-size: 11px;
-    letter-spacing: 3px;
-    color: #333;
-    margin-bottom: 16px;
-    text-transform: uppercase;
-}
-
-#titulo {
-    font-size: 38px;
-    font-weight: 700;
-    color: #fff;
-    letter-spacing: -1px;
-    line-height: 1.1;
-}
-
-#titulo span { color: #ff3c00; }
-
-#sub {
-    font-size: 14px;
-    color: #444;
-    margin-top: 10px;
-    font-family: 'Space Mono', monospace;
-}
-
-.card {
-    background: #0e0e0e;
-    border: 1px solid #1a1a1a;
-    border-radius: 12px;
-    padding: 28px;
-    margin-bottom: 16px;
-}
-
-label { color: #666 !important; font-size: 11px !important; letter-spacing: 1px !important; text-transform: uppercase !important; font-family: 'Space Mono', monospace !important; }
-
-input[type="text"], textarea {
-    background: #111 !important;
-    border: 1px solid #222 !important;
-    border-radius: 8px !important;
-    color: #ddd !important;
-    font-family: 'Space Grotesk', sans-serif !important;
-}
-
-input[type="text"]:focus, textarea:focus {
-    border-color: #ff3c00 !important;
-    outline: none !important;
-    box-shadow: 0 0 0 2px #ff3c0015 !important;
-}
-
-button.primary {
-    background: #ff3c00 !important;
-    border: none !important;
-    border-radius: 8px !important;
-    color: #fff !important;
-    font-family: 'Space Grotesk', sans-serif !important;
-    font-weight: 700 !important;
-    font-size: 14px !important;
-    letter-spacing: 0.5px !important;
-    padding: 12px 28px !important;
-    transition: opacity 0.2s !important;
-}
-
-button.primary:hover { opacity: 0.85 !important; }
-
-.status-box {
-    font-family: 'Space Mono', monospace;
-    font-size: 12px;
-    padding: 12px 16px;
-    border-radius: 8px;
-    border-left: 3px solid #ff3c00;
-    background: #0e0e0e;
-    color: #888;
-}
-
-.tabs { border-bottom: 1px solid #1a1a1a !important; }
-.tab-nav button { color: #444 !important; font-family: 'Space Grotesk', sans-serif !important; }
-.tab-nav button.selected { color: #ff3c00 !important; border-bottom: 2px solid #ff3c00 !important; }
-
-footer { display: none !important; }
-"""
-
-# ── INTERFACE ──
-with gr.Blocks(css=CSS, title="V8 Voice Machine") as demo:
-
-    gr.HTML("""
-    <div id="header">
-        <div id="logo">Algoritmo Secreto</div>
-        <div id="titulo">V8 <span>Voice</span> Machine</div>
-        <div id="sub">estúdio de voz IA · clone qualquer voz · PT-BR</div>
-    </div>
-    """)
-
-    # Chave de acesso global
-    with gr.Group(elem_classes="card"):
-        gr.HTML('<div style="color:#555;font-size:11px;font-family:monospace;letter-spacing:1px;margin-bottom:12px">ACESSO</div>')
-        chave_input = gr.Textbox(
-            placeholder="V8VM-XXXXXX",
-            label="Chave de licença",
-            max_lines=1
-        )
-
-    with gr.Tabs():
-
-        # ── TAB 1: NARRADOR ──
-        with gr.Tab("🎙️ Narrador"):
-            with gr.Group(elem_classes="card"):
-                gr.HTML('<div style="color:#555;font-size:11px;font-family:monospace;letter-spacing:1px;margin-bottom:12px">ROTEIRO</div>')
-                texto_narrador = gr.Textbox(
-                    placeholder="Cole aqui o roteiro do vídeo...",
-                    label="",
-                    lines=8,
-                    max_lines=50
-                )
-                expressividade_1 = gr.Slider(
-                    minimum=0.0, maximum=1.0, value=0.3, step=0.05,
-                    label="Expressividade (0 = neutro · 1.0 = máxima)"
-                )
-                btn_narrador = gr.Button("⚡ Gerar narração", variant="primary")
-
-            status_1 = gr.Textbox(label="Status", interactive=False, elem_classes="status-box")
-            audio_out_1 = gr.Audio(label="Áudio gerado", type="filepath")
-
-            btn_narrador.click(
-                fn=gerar_narrador,
-                inputs=[chave_input, texto_narrador, expressividade_1],
-                outputs=[audio_out_1, status_1]
-            )
-
-        # ── TAB 2: CLONE ──
-        with gr.Tab("🧬 Clone de voz"):
-            with gr.Group(elem_classes="card"):
-                gr.HTML('<div style="color:#555;font-size:11px;font-family:monospace;letter-spacing:1px;margin-bottom:12px">REFERÊNCIA · upload de 10 a 60 segundos</div>')
-                audio_ref = gr.Audio(label="", type="filepath", sources=["upload"])
-
-                gr.HTML('<div style="color:#555;font-size:11px;font-family:monospace;letter-spacing:1px;margin:16px 0 12px">ROTEIRO</div>')
-                texto_clone = gr.Textbox(
-                    placeholder="Cole aqui o texto que será narrado com a voz clonada...",
-                    label="",
-                    lines=6
-                )
-                expressividade_2 = gr.Slider(
-                    minimum=0.0, maximum=1.0, value=0.3, step=0.05,
-                    label="Expressividade"
-                )
-                btn_clone = gr.Button("🧬 Clonar e gerar", variant="primary")
-
-            gr.HTML('<div style="color:#333;font-size:11px;font-family:monospace;padding:8px 0">Disponível nos planos PRO e FULL</div>')
-            status_2 = gr.Textbox(label="Status", interactive=False, elem_classes="status-box")
-            audio_out_2 = gr.Audio(label="Áudio clonado", type="filepath")
-
-            btn_clone.click(
-                fn=gerar_clone,
-                inputs=[chave_input, texto_clone, audio_ref, expressividade_2],
-                outputs=[audio_out_2, status_2]
-            )
-
-    gr.HTML("""
-    <div style="text-align:center;padding:32px 0 8px;border-top:1px solid #111;margin-top:24px">
-        <div style="font-family:monospace;font-size:10px;color:#222;letter-spacing:2px">
-            V8 VOICE MACHINE · ALGORITMO SECRETO · algoritmosecreto.com
+    if ok:
+        nome  = dados.get("nome","Usuário")
+        plano = dados.get("plano","BASICO").upper()
+        exp   = dados.get("expira","ilimitado")
+        st.markdown(f"""
+        <div class="status-ok">
+            ✅ <b style="color:#00ff88">ACESSO LIBERADO</b><br>
+            👤 {nome} &nbsp;|&nbsp; 📦 {plano} &nbsp;|&nbsp; 📅 {exp}
         </div>
-    </div>
-    """)
+        """, unsafe_allow_html=True)
+        licenca_ok = True
+        dados_licenca = dados
+    else:
+        st.markdown(f'<div class="status-err">❌ {erro}</div>', unsafe_allow_html=True)
 
-demo.launch()
+st.markdown("---")
+
+# ── ABAS ──
+tab1, tab2 = st.tabs(["🎙️ Narrador", "🧬 Clone de voz"])
+
+# ── TAB 1: NARRADOR ──
+with tab1:
+    st.markdown('<div class="label">Roteiro</div>', unsafe_allow_html=True)
+    roteiro = st.text_area("", placeholder="Cole aqui o roteiro do vídeo...", height=200, label_visibility="collapsed")
+    expressividade = st.slider("Expressividade", 0.0, 1.0, 0.3, 0.05, help="0 = neutro · 1.0 = máxima expressividade")
+    nome_arquivo = st.text_input("Nome do arquivo", value="narracao_01")
+
+    if st.button("⚡ Gerar narração", key="btn_narrador"):
+        if not licenca_ok:
+            st.error("❌ Insira uma chave válida acima.")
+        elif not roteiro.strip():
+            st.warning("⚠️ Cole o roteiro acima.")
+        else:
+            with st.spinner("Carregando modelo de voz..."):
+                model = carregar_modelo()
+            with st.spinner("Gerando narração..."):
+                try:
+                    wav = model.generate(roteiro, exaggeration=expressividade, cfg_weight=0.5)
+                    audio_np = wav.squeeze().numpy()
+                    tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
+                    sf.write(tmp.name, audio_np, model.sr)
+                    dur = len(audio_np) / model.sr
+                    st.success(f"✅ Gerado! {dur/60:.1f} minutos")
+                    st.audio(tmp.name, format="audio/wav")
+                    with open(tmp.name, "rb") as f:
+                        st.download_button("⬇️ Baixar áudio", f, file_name=f"{nome_arquivo}.wav", mime="audio/wav")
+                except Exception as e:
+                    st.error(f"❌ Erro: {e}")
+
+# ── TAB 2: CLONE ──
+with tab2:
+    if licenca_ok and dados_licenca and dados_licenca.get("plano","").upper() not in ["PRO","FULL"]:
+        st.warning("🔒 Clone de voz disponível apenas nos planos PRO e FULL.")
+    else:
+        st.markdown('<div class="label">Áudio de referência (10 a 60 segundos)</div>', unsafe_allow_html=True)
+        audio_ref = st.file_uploader("", type=["wav","mp3","m4a"], label_visibility="collapsed")
+
+        st.markdown('<div class="label">Roteiro</div>', unsafe_allow_html=True)
+        roteiro_clone = st.text_area("", placeholder="Cole o texto que será narrado com a voz clonada...", height=180, key="roteiro_clone", label_visibility="collapsed")
+        expr_clone = st.slider("Expressividade", 0.0, 1.0, 0.3, 0.05, key="expr_clone")
+        nome_clone = st.text_input("Nome do arquivo", value="clone_01", key="nome_clone")
+
+        if st.button("🧬 Clonar e gerar", key="btn_clone"):
+            if not licenca_ok:
+                st.error("❌ Insira uma chave válida acima.")
+            elif audio_ref is None:
+                st.warning("⚠️ Faça upload do áudio de referência.")
+            elif not roteiro_clone.strip():
+                st.warning("⚠️ Cole o roteiro.")
+            else:
+                tmp_ref = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
+                tmp_ref.write(audio_ref.read())
+                tmp_ref.close()
+                with st.spinner("Carregando modelo..."):
+                    model = carregar_modelo()
+                with st.spinner("Clonando voz e gerando áudio..."):
+                    try:
+                        wav = model.generate(roteiro_clone, audio_prompt_path=tmp_ref.name, exaggeration=expr_clone, cfg_weight=0.5)
+                        audio_np = wav.squeeze().numpy()
+                        tmp_out = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
+                        sf.write(tmp_out.name, audio_np, model.sr)
+                        dur = len(audio_np) / model.sr
+                        st.success(f"✅ Clone gerado! {dur/60:.1f} minutos")
+                        st.audio(tmp_out.name, format="audio/wav")
+                        with open(tmp_out.name, "rb") as f:
+                            st.download_button("⬇️ Baixar áudio", f, file_name=f"{nome_clone}.wav", mime="audio/wav")
+                    except Exception as e:
+                        st.error(f"❌ Erro: {e}")
+
+# ── FOOTER ──
+st.markdown("""
+<div style="text-align:center;padding:32px 0 8px;border-top:1px solid #111;margin-top:32px">
+    <div style="font-family:monospace;font-size:10px;color:#222;letter-spacing:2px">
+        V8 VOICE MACHINE · ALGORITMO SECRETO · algoritmosecreto.com
+    </div>
+</div>
+""", unsafe_allow_html=True)
